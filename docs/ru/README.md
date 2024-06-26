@@ -34,6 +34,7 @@ ChatTTS - мощная система преобразования текста 
 ```python
 import ChatTTS
 from IPython.display import Audio
+import torch
 
 chat = ChatTTS.Chat()
 chat.load(compile=False) # Установите значение True для лучшей производительности
@@ -52,6 +53,7 @@ torchaudio.save("output1.wav", torch.from_numpy(wavs[0]), 24000)
 # Выборка говорящего из Гауссиана.
 
 rand_spk = chat.sample_random_speaker()
+print(rand_spk) # save it for later timbre recovery
 
 params_infer_code = {
   'spk_emb': rand_spk, # добавить выбранного говорящего

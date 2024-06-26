@@ -123,6 +123,7 @@ python examples/cmd/run.py "Please input your text."
 import ChatTTS
 from IPython.display import Audio
 import torchaudio
+import torch
 
 chat = ChatTTS.Chat()
 chat.load(compile=False) # Set to True for better performance
@@ -141,6 +142,7 @@ torchaudio.save("output1.wav", torch.from_numpy(wavs[0]), 24000)
 # Sample a speaker from Gaussian.
 
 rand_spk = chat.sample_random_speaker()
+print(rand_spk) # save it for later timbre recovery
 
 params_infer_code = {
   'spk_emb': rand_spk, # add sampled speaker 
