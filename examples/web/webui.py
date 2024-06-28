@@ -21,22 +21,23 @@ def main():
         gr.Markdown("- **GitHub Repo**: https://github.com/2noise/ChatTTS")
         gr.Markdown("- **HuggingFace Repo**: https://huggingface.co/2Noise/ChatTTS")
 
-        default_text = "四川美食确实以辣闻名，但也有不辣的选择。比如甜水面、赖汤圆、蛋烘糕、叶儿粑等，这些小吃口味温和，甜而不腻，也很受欢迎。"
         text_input = gr.Textbox(
             label="Input Text",
             lines=4,
             placeholder="Please Input Text...",
-            value=default_text,
+            value=ex[0][0],
             interactive=True,
         )
 
         with gr.Row():
-            refine_text_checkbox = gr.Checkbox(label="Refine text", value=True)
+            refine_text_checkbox = gr.Checkbox(
+                label="Refine text", value=ex[0][6], interactive=True
+            )
             temperature_slider = gr.Slider(
                 minimum=0.00001,
                 maximum=1.0,
                 step=0.00001,
-                value=0.3,
+                value=ex[0][1],
                 label="Audio Temperature",
                 interactive=True,
             )
@@ -44,34 +45,42 @@ def main():
                 minimum=0.1,
                 maximum=0.9,
                 step=0.05,
-                value=0.7,
+                value=ex[0][2],
                 label="top_P",
                 interactive=True,
             )
             top_k_slider = gr.Slider(
-                minimum=1, maximum=20, step=1, value=20, label="top_K", interactive=True
+                minimum=1,
+                maximum=20,
+                step=1,
+                value=ex[0][3],
+                label="top_K",
+                interactive=True,
             )
 
         with gr.Row():
             voice_selection = gr.Dropdown(
-                label="Timbre", choices=voices.keys(), value="Default"
+                label="Timbre",
+                choices=voices.keys(),
+                value="Default",
+                interactive=True,
             )
             audio_seed_input = gr.Number(
-                value=2,
+                value=ex[0][4],
                 label="Audio Seed",
                 interactive=True,
                 minimum=seed_min,
                 maximum=seed_max,
             )
-            generate_audio_seed = gr.Button("\U0001F3B2")
+            generate_audio_seed = gr.Button("\U0001F3B2", interactive=True)
             text_seed_input = gr.Number(
-                value=42,
+                value=ex[0][5],
                 label="Text Seed",
                 interactive=True,
                 minimum=seed_min,
                 maximum=seed_max,
             )
-            generate_text_seed = gr.Button("\U0001F3B2")
+            generate_text_seed = gr.Button("\U0001F3B2", interactive=True)
 
         with gr.Row():
             spk_emb_text = gr.Textbox(
@@ -88,20 +97,33 @@ def main():
                 interactive=True,
                 scale=2,
             )
-            reload_chat_button = gr.Button("Reload", scale=1)
+            reload_chat_button = gr.Button("Reload", scale=1, interactive=True)
 
         with gr.Row():
-            auto_play_checkbox = gr.Checkbox(label="Auto Play", value=False, scale=1)
-            stream_mode_checkbox = gr.Checkbox(
-                label="Stream Mode", value=False, scale=1
+            auto_play_checkbox = gr.Checkbox(
+                label="Auto Play", value=False, scale=1, interactive=True
             )
-            generate_button = gr.Button("Generate", scale=2, variant="primary")
+            stream_mode_checkbox = gr.Checkbox(
+                label="Stream Mode",
+                value=False,
+                scale=1,
+                interactive=True,
+            )
+            generate_button = gr.Button(
+                "Generate", scale=2, variant="primary", interactive=True
+            )
             interrupt_button = gr.Button(
-                "Interrupt", scale=2, variant="stop", visible=False, interactive=False
+                "Interrupt",
+                scale=2,
+                variant="stop",
+                visible=False,
+                interactive=False,
             )
 
         text_output = gr.Textbox(
-            label="Output Text", interactive=False, show_copy_button=True
+            label="Output Text",
+            interactive=False,
+            show_copy_button=True,
         )
 
         # 使用Gradio的回调功能来更新数值输入框
