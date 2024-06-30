@@ -2,7 +2,7 @@ import os
 import logging
 import tempfile
 from dataclasses import dataclass
-from typing import Literal, Optional, List, Callable, Tuple, Dict
+from typing import Literal, Optional, List, Tuple, Dict
 from json import load
 from pathlib import Path
 import lzma
@@ -47,7 +47,7 @@ class Chat:
 
     def has_loaded(self, use_decoder=False):
         not_finish = False
-        check_list = ["vocos", "_vocos_decode", "gpt", "tokenizer"]
+        check_list = ["vocos", "gpt", "tokenizer"]
 
         if use_decoder:
             check_list.append("decoder")
@@ -150,7 +150,7 @@ class Chat:
         self.normalizer.destroy()
         del self.normalizer
         del self.sha256_map
-        del_list = ["vocos", "_vocos_decode", "gpt", "decoder", "dvae"]
+        del_list = ["vocos", "gpt", "decoder", "dvae"]
         for module in del_list:
             if hasattr(self, module):
                 delattr(self, module)
@@ -260,7 +260,7 @@ class Chat:
     ):
         if device is None:
             device = select_device()
-            self.logger.log(logging.INFO, f"use {device}")
+            self.logger.info("use device %s", str(device))
         self.device = device
 
         if vocos_config_path:
@@ -279,14 +279,6 @@ class Chat:
                 torch.load(vocos_ckpt_path, weights_only=True, mmap=True)
             )
             self.vocos = vocos
-            if "mps" in str(self.device):
-                self._vocos_decode: Callable[[torch.Tensor], np.ndarray] = (
-                    lambda spec: self.vocos.decode(spec.cpu()).cpu().numpy()
-                )
-            else:
-                self._vocos_decode: Callable[[torch.Tensor], np.ndarray] = (
-                    lambda spec: self.vocos.decode(spec).cpu().numpy()
-                )
             self.logger.log(logging.INFO, "vocos loaded.")
 
         if dvae_config_path:
@@ -307,6 +299,9 @@ class Chat:
             gpt.load_state_dict(torch.load(gpt_ckpt_path, weights_only=True, mmap=True))
             if compile and "cuda" in str(device):
                 try:
+                    gpt.forward = torch.compile(
+                        gpt.forward, backend="inductor", dynamic=True
+                    )
                     gpt.gpt.forward = torch.compile(
                         gpt.gpt.forward, backend="inductor", dynamic=True
                     )
@@ -413,6 +408,12 @@ class Chat:
                 wav = self._decode_to_wavs(result, length, use_decoder)
                 yield wav
 
+    def _vocos_decode(self, spec: torch.Tensor) -> np.ndarray:
+        if "mps" in str(self.device):
+            return self.vocos.decode(spec.cpu()).cpu().numpy()
+        else:
+            return self.vocos.decode(spec).cpu().numpy()
+
     def _decode_to_wavs(
         self, result: GPT.GenerationOutputs, start_seeks: List[int], use_decoder: bool
     ):
@@ -436,23 +437,54 @@ class Chat:
         return wavs
 
     def _text_to_token(
-        self, text: str, device="cpu"
+        self, text: List[str], device="cpu"
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        gpt = self.gpt
         tokenizer = self.pretrain_models["tokenizer"]
 
-        text_token_tmp = tokenizer(
-            text, return_tensors="pt", add_special_tokens=False, padding=True
+        input_ids_lst = []
+        attention_mask_lst = []
+        max_input_ids_len = -1
+        max_attention_mask_len = -1
+        # avoid random speaker embedding of tokenizer in the other dims
+        for t in text:
+            x = tokenizer(
+                t, return_tensors="pt", add_special_tokens=False, padding=True
+            )
+            input_ids_lst.append(x["input_ids"].squeeze_(0))
+            attention_mask_lst.append(x["attention_mask"].squeeze_(0))
+            del_all(x)
+            ids_sz = input_ids_lst[-1].size(0)
+            if ids_sz > max_input_ids_len:
+                max_input_ids_len = ids_sz
+            attn_sz = attention_mask_lst[-1].size(0)
+            if attn_sz > max_attention_mask_len:
+                max_attention_mask_len = attn_sz
+        input_ids = torch.zeros(
+            len(input_ids_lst),
+            max_input_ids_len,
+            device=device,
+            dtype=input_ids_lst[0].dtype,
         )
-        text_token = text_token_tmp.to(device)
-        del text_token_tmp
+        for i in range(len(input_ids_lst)):
+            input_ids.narrow(0, i, 1).narrow(1, 0, input_ids_lst[i].size(0)).copy_(
+                input_ids_lst[i]
+            )
+        del_all(input_ids_lst)
+        attention_mask = torch.zeros(
+            len(attention_mask_lst),
+            max_attention_mask_len,
+            device=device,
+            dtype=attention_mask_lst[0].dtype,
+        )
+        for i in range(len(attention_mask_lst)):
+            attention_mask.narrow(0, i, 1).narrow(
+                1, 0, attention_mask_lst[i].size(0)
+            ).copy_(attention_mask_lst[i])
+        del_all(attention_mask_lst)
 
-        input_ids = text_token["input_ids"].unsqueeze(-1).expand(-1, -1, gpt.num_vq)
-        text_mask = torch.ones(text_token["input_ids"].shape, dtype=bool, device=device)
-        attention_mask = text_token["attention_mask"]
-
-        del_all(text_token)
+        text_mask = torch.ones(input_ids.shape, dtype=bool, device=device)
+        input_ids = input_ids.unsqueeze_(-1).expand(-1, -1, self.gpt.num_vq)
 
         return input_ids, attention_mask, text_mask
 
@@ -472,20 +504,19 @@ class Chat:
         emb: torch.Tensor,
         spk_emb: str,
         input_ids: torch.Tensor,
-        text_len: int,
     ):
         n = (
             F.normalize(
                 torch.from_numpy(
                     self._decode_spk_emb(spk_emb),
-                )
-                .unsqueeze(0)
-                .expand(text_len, -1),
+                ),
                 p=2.0,
-                dim=1,
+                dim=0,
                 eps=1e-12,
             )
             .to(self.gpt.device_gpt)
+            .unsqueeze_(0)
+            .expand(emb.size(0), -1)
             .unsqueeze_(1)
             .expand(emb.shape)
         )
@@ -541,7 +572,7 @@ class Chat:
         del text_mask
 
         if params.spk_emb is not None:
-            self._apply_spk_emb(emb, params.spk_emb, input_ids, len(text))
+            self._apply_spk_emb(emb, params.spk_emb, input_ids)
 
         num_code = int(gpt.emb_code[0].num_embeddings - 1)
 
