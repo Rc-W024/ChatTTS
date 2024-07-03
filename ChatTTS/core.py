@@ -128,6 +128,7 @@ class Chat:
         custom_path: Optional[torch.serialization.FILE_LIKE] = None,
         device: Optional[torch.device] = None,
         coef: Optional[torch.Tensor] = None,
+        use_flash_attn=False,
     ) -> bool:
         download_path = self.download_models(source, force_redownload, custom_path)
         if download_path is None:
@@ -136,6 +137,7 @@ class Chat:
             device=device,
             compile=compile,
             coef=coef,
+            use_flash_attn=use_flash_attn,
             **{
                 k: os.path.join(download_path, v)
                 for k, v in OmegaConf.load(
@@ -197,17 +199,16 @@ class Chat:
         repetition_penalty: float = 1.0
         max_new_token: int = 384
         min_new_token: int = 0
+        show_tqdm: bool = True
+        ensure_non_empty: bool = True
 
     @dataclass(repr=False, eq=False)
-    class InferCodeParams:
+    class InferCodeParams(RefineTextParams):
         prompt: str = "[speed_5]"
         spk_emb: Optional[str] = None
-        top_P: float = 0.7
-        top_K: int = 20
         temperature: float = 0.3
         repetition_penalty: float = 1.05
         max_new_token: int = 2048
-        min_new_token: int = 0
 
     def infer(
         self,
@@ -257,6 +258,7 @@ class Chat:
         device: Optional[torch.device] = None,
         compile: bool = True,
         coef: Optional[str] = None,
+        use_flash_attn=False,
     ):
         if device is None:
             device = select_device()
@@ -294,21 +296,12 @@ class Chat:
 
         if gpt_config_path:
             cfg = OmegaConf.load(gpt_config_path)
-            gpt = GPT(**cfg, device=device, logger=self.logger).eval()
+            gpt = GPT(
+                **cfg, use_flash_attn=use_flash_attn, device=device, logger=self.logger
+            ).eval()
             assert gpt_ckpt_path, "gpt_ckpt_path should not be None"
             gpt.load_state_dict(torch.load(gpt_ckpt_path, weights_only=True, mmap=True))
-            if compile and "cuda" in str(device):
-                try:
-                    gpt.forward = torch.compile(
-                        gpt.forward, backend="inductor", dynamic=True
-                    )
-                    gpt.gpt.forward = torch.compile(
-                        gpt.gpt.forward, backend="inductor", dynamic=True
-                    )
-                except RuntimeError as e:
-                    self.logger.warning(
-                        f"compile failed: {e}. fallback to normal mode."
-                    )
+            gpt.prepare(compile=compile and "cuda" in str(device))
             self.gpt = gpt
             spk_stat_path = os.path.join(os.path.dirname(gpt_ckpt_path), "spk_stat.pt")
             assert os.path.exists(
@@ -596,6 +589,7 @@ class Chat:
             infer_text=False,
             return_hidden=return_hidden,
             stream=stream,
+            show_tqdm=params.show_tqdm,
             context=self.context,
         )
 
@@ -644,6 +638,7 @@ class Chat:
                 logits_processors=logits_processors,
                 infer_text=True,
                 stream=False,
+                show_tqdm=params.show_tqdm,
                 context=self.context,
             )
         )
