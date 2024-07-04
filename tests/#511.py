@@ -46,7 +46,7 @@ wavs = chat.infer(
 
 for k, wav in enumerate(wavs):
     if wav is None:
-        logger.warn("index", k, "is None")
+        logger.warning("index", k, "is None")
         fail = True
 
 if fail:

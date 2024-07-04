@@ -4,7 +4,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
 
-    if: github.actor != 'github-actions[bot]'
+    if: "!contains(github.event.head_commit.message, 'chore(format): ')"
 
     strategy:
       matrix:
@@ -20,6 +20,10 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
+      
+      - name: Install Dependents
+        run: |
+          sudo apt-get install -y portaudio19-dev python3-pyaudio
 
       - name: Test Install
         run: pip install .
