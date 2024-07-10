@@ -347,7 +347,7 @@ class GPT(nn.Module):
             hiddens=hiddens,
         )
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate(
         self,
         emb: torch.Tensor,
