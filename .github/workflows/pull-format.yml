@@ -2,7 +2,7 @@ name: Check Pull Request Format
 
 on:
   pull_request_target:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
 
 jobs:
   # This workflow closes invalid PR
@@ -51,17 +51,17 @@ jobs:
     continue-on-error: true
 
     steps:
-      - name: Checkout
+      - name: Checkout Repo
         continue-on-error: true
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 0
+        uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
+      - name: Checkout PR # see https://github.com/orgs/community/discussions/24945
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr checkout ${{ github.event.pull_request.number }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
 
       - name: Install Black
         run: pip install "black[jupyter]"
@@ -71,6 +71,8 @@ jobs:
         run: black .
 
       - name: Commit back
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
         run: |
           git config --local user.name 'github-actions[bot]'

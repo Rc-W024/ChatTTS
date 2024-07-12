@@ -150,11 +150,14 @@ def main():
             audio_output = gr.Audio(
                 label="Output Audio",
                 value=None,
-                format="mp3" if use_mp3 else "wav",
+                format="mp3" if use_mp3 and not stream else "wav",
                 autoplay=autoplay,
                 streaming=stream,
                 interactive=False,
                 show_label=True,
+                waveform_options=gr.WaveformOptions(
+                    sample_rate=24000,
+                ),
             )
             generate_button.click(
                 fn=set_buttons_before_generate,
