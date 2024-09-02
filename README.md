@@ -6,7 +6,7 @@
 A generative speech model for daily dialogue.
 
 [![Licence](https://img.shields.io/github/license/2noise/ChatTTS?style=for-the-badge)](https://github.com/2noise/ChatTTS/blob/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/ChatTTS.svg?style=for-the-badge)](https://pypi.org/project/ChatTTS)
+[![PyPI](https://img.shields.io/pypi/v/ChatTTS.svg?style=for-the-badge&color=green)](https://pypi.org/project/ChatTTS)
 
 [![Huggingface](https://img.shields.io/badge/🤗%20-Models-yellow.svg?style=for-the-badge)](https://huggingface.co/2Noise/ChatTTS)
 [![Open In Colab](https://img.shields.io/badge/Colab-F9AB00?style=for-the-badge&logo=googlecolab&color=525252)](https://colab.research.google.com/github/2noise/ChatTTS/blob/main/examples/ipynb/colab.ipynb)
@@ -101,25 +101,33 @@ conda activate chattts
 pip install -r requirements.txt
 ```
 
-#### Optional: Install TransformerEngine if using NVIDIA GPU (Linux only)
+#### Optional: Install vLLM (Linux only)
+```bash
+pip install safetensors vllm==0.2.7 torchaudio
+```
+
+#### Unrecommended Optional: Install TransformerEngine if using NVIDIA GPU (Linux only)
+> [!Warning]
+> DO NOT INSTALL! 
+> The adaptation of TransformerEngine is currently under development and CANNOT run properly now. 
+> Only install it on developing purpose. See more details on at #672 #676
+
 > [!Note]
 > The installation process is very slow.
-
-> [!Warning]
-> The adaptation of TransformerEngine is currently under development and CANNOT run properly now. 
-> Only install it on developing purpose.
 
 ```bash
 pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 ```
 
-#### Optional: Install FlashAttention-2 (mainly NVIDIA GPU)
+#### Unrecommended Optional: Install FlashAttention-2 (mainly NVIDIA GPU)
+> [!Warning]
+> DO NOT INSTALL! 
+> Currently the FlashAttention-2 will slow down the generating speed according to [this issue](https://github.com/huggingface/transformers/issues/26990). 
+> Only install it on developing purpose.
+
 > [!Note]
 > See supported devices at the [Hugging Face Doc](https://huggingface.co/docs/transformers/perf_infer_gpu_one#flashattention-2).
 
-> [!Warning]
-> Currently the FlashAttention-2 will slow down the generating speed according to [this issue](https://github.com/huggingface/transformers/issues/26990). 
-> Only install it on developing purpose.
 
 ```bash
 pip install flash-attn --no-build-isolation
@@ -172,7 +180,13 @@ texts = ["PUT YOUR 1st TEXT HERE", "PUT YOUR 2nd TEXT HERE"]
 wavs = chat.infer(texts)
 
 for i in range(len(wavs)):
-    torchaudio.save(f"basic_output{i}.wav", torch.from_numpy(wavs[i]).unsqueeze(0), 24000)
+    """
+    In some versions of torchaudio, the first line works but in other versions, so does the second line.
+    """
+    try:
+        torchaudio.save(f"basic_output{i}.wav", torch.from_numpy(wavs[i]).unsqueeze(0), 24000)
+    except:
+        torchaudio.save(f"basic_output{i}.wav", torch.from_numpy(wavs[i]), 24000)
 ```
 
 ### Advanced Usage
@@ -211,7 +225,13 @@ wavs = chat.infer(
 
 text = 'What is [uv_break]your favorite english food?[laugh][lbreak]'
 wavs = chat.infer(text, skip_refine_text=True, params_refine_text=params_refine_text,  params_infer_code=params_infer_code)
-torchaudio.save("word_level_output.wav", torch.from_numpy(wavs[0]).unsqueeze(0), 24000)
+"""
+In some versions of torchaudio, the first line works but in other versions, so does the second line.
+"""
+try:
+    torchaudio.save("word_level_output.wav", torch.from_numpy(wavs[0]).unsqueeze(0), 24000)
+except:
+    torchaudio.save("word_level_output.wav", torch.from_numpy(wavs[0]), 24000)
 ```
 
 <details open>
@@ -279,7 +299,7 @@ This is a problem that typically occurs with autoregressive models (for bark and
 In the current released model, the only token-level control units are `[laugh]`, `[uv_break]`, and `[lbreak]`. In future versions, we may open-source models with additional emotional control capabilities.
 
 ## Acknowledgements
-- [bark](https://github.com/suno-ai/bark), [XTTSv2](https://github.com/coqui-ai/TTS) and [valle](https://arxiv.org/abs/2301.02111) demostrate a remarkable TTS result by an autoregressive-style system.
+- [bark](https://github.com/suno-ai/bark), [XTTSv2](https://github.com/coqui-ai/TTS) and [valle](https://arxiv.org/abs/2301.02111) demonstrate a remarkable TTS result by an autoregressive-style system.
 - [fish-speech](https://github.com/fishaudio/fish-speech) reveals capability of GVQ as audio tokenizer for LLM modeling.
 - [vocos](https://github.com/gemelo-ai/vocos) which is used as a pretrained vocoder.
 

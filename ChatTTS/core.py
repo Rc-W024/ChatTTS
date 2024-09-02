@@ -5,17 +5,15 @@ from dataclasses import dataclass, asdict
 from typing import Literal, Optional, List, Tuple, Dict, Union
 from json import load
 from pathlib import Path
-import lzma
 
 import numpy as np
 import torch
 from vocos import Vocos
 from vocos.pretrained import instantiate_class
 from huggingface_hub import snapshot_download
-import pybase16384 as b14
 
 from .config import Config
-from .model import DVAE, GPT, gen_logits, Tokenizer
+from .model import DVAE, GPT, gen_logits, Tokenizer, Speaker
 from .utils import (
     check_all_assets,
     download_all_assets,
@@ -60,9 +58,6 @@ class Chat:
                 self.logger.warning(f"{module} not initialized.")
                 not_finish = True
 
-        if not not_finish:
-            self.logger.info("all models has been initialized.")
-
         return not not_finish
 
     def download_models(
@@ -101,7 +96,8 @@ class Chat:
                 )
                 try:
                     download_path = snapshot_download(
-                        repo_id="2Noise/ChatTTS", allow_patterns=["*.pt", "*.yaml"]
+                        repo_id="2Noise/ChatTTS",
+                        allow_patterns=["*.pt", "*.yaml", "*.json"],
                     )
                 except:
                     download_path = None
@@ -125,11 +121,13 @@ class Chat:
         self,
         source: Literal["huggingface", "local", "custom"] = "local",
         force_redownload=False,
-        compile: bool = True,
+        compile: bool = False,
         custom_path: Optional[torch.serialization.FILE_LIKE] = None,
         device: Optional[torch.device] = None,
         coef: Optional[torch.Tensor] = None,
         use_flash_attn=False,
+        use_vllm=False,
+        experimental: bool = False,
     ) -> bool:
         download_path = self.download_models(source, force_redownload, custom_path)
         if download_path is None:
@@ -139,6 +137,8 @@ class Chat:
             compile=compile,
             coef=coef,
             use_flash_attn=use_flash_attn,
+            use_vllm=use_vllm,
+            experimental=experimental,
             **{
                 k: os.path.join(download_path, v)
                 for k, v in asdict(self.config.path).items()
@@ -157,23 +157,10 @@ class Chat:
         self.__init__(logger)
 
     def sample_random_speaker(self) -> str:
-        return self.tokenizer._encode_spk_emb(self._sample_random_speaker())
+        return self.speaker.sample_random()
 
-    @torch.inference_mode()
     def sample_audio_speaker(self, wav: Union[np.ndarray, torch.Tensor]) -> str:
-        if isinstance(wav, np.ndarray):
-            wav = torch.from_numpy(wav).to(self.device)
-        return self.tokenizer._encode_prompt(self.dvae(wav, "encode").squeeze_(0))
-
-    @torch.no_grad()
-    def _sample_random_speaker(self) -> torch.Tensor:
-        dim: int = self.gpt.gpt.layers[0].mlp.gate_proj.in_features
-        spk = (
-            torch.randn(dim, device=self.std.device, dtype=self.std.dtype)
-            .mul_(self.std)
-            .add_(self.mean)
-        )
-        return spk
+        return self.speaker.encode_prompt(self.dvae.sample_audio(wav))
 
     @dataclass(repr=False, eq=False)
     class RefineTextParams:
@@ -186,6 +173,7 @@ class Chat:
         min_new_token: int = 0
         show_tqdm: bool = True
         ensure_non_empty: bool = True
+        manual_seed: Optional[int] = None
 
     @dataclass(repr=False, eq=False)
     class InferCodeParams(RefineTextParams):
@@ -243,14 +231,17 @@ class Chat:
         decoder_ckpt_path: str = None,
         tokenizer_path: str = None,
         device: Optional[torch.device] = None,
-        compile: bool = True,
+        compile: bool = False,
         coef: Optional[str] = None,
         use_flash_attn=False,
+        use_vllm=False,
+        experimental: bool = False,
     ):
         if device is None:
-            device = select_device()
+            device = select_device(experimental=experimental)
             self.logger.info("use device %s", str(device))
         self.device = device
+        self.device_gpt = device if "mps" not in str(device) else torch.device("cpu")
         self.compile = compile
 
         feature_extractor = instantiate_class(
@@ -293,22 +284,19 @@ class Chat:
         gpt = GPT(
             gpt_config=asdict(self.config.gpt),
             use_flash_attn=use_flash_attn,
+            use_vllm=use_vllm,
             device=device,
+            device_gpt=self.device_gpt,
             logger=self.logger,
         ).eval()
         assert gpt_ckpt_path, "gpt_ckpt_path should not be None"
-        gpt.from_pretrained(gpt_ckpt_path)
+        gpt.from_pretrained(gpt_ckpt_path, experimental=experimental)
         gpt.prepare(compile=compile and "cuda" in str(device))
         self.gpt = gpt
-        spk_stat_path = os.path.join(os.path.dirname(gpt_ckpt_path), "spk_stat.pt")
-        assert os.path.exists(spk_stat_path), f"Missing spk_stat.pt: {spk_stat_path}"
-        spk_stat: torch.Tensor = torch.load(
-            spk_stat_path,
-            weights_only=True,
-            mmap=True,
-            map_location=device,
+
+        self.speaker = Speaker(
+            self.config.gpt.hidden_size, self.config.spk_stat, device
         )
-        self.std, self.mean = spk_stat.requires_grad_(False).chunk(2)
         self.logger.log(logging.INFO, "gpt loaded.")
 
         decoder = (
@@ -329,7 +317,7 @@ class Chat:
         self.logger.log(logging.INFO, "decoder loaded.")
 
         if tokenizer_path:
-            self.tokenizer = Tokenizer(tokenizer_path, device)
+            self.tokenizer = Tokenizer(tokenizer_path)
             self.logger.log(logging.INFO, "tokenizer loaded.")
 
         self.coef = coef
@@ -364,6 +352,8 @@ class Chat:
             )
             for t in text
         ]
+
+        self.logger.debug("normed texts %s", str(text))
 
         if not skip_refine_text:
             refined = self._refine_text(
@@ -469,47 +459,28 @@ class Chat:
         assert len(text), "text should not be empty"
 
         if not isinstance(params.temperature, list):
-            temperature = [params.temperature] * gpt.num_vq
+            temperature = [params.temperature] * self.config.gpt.num_vq
         else:
             temperature = params.temperature
 
-        for i, t in enumerate(text):
-            text[i] = (
-                t.replace("[Stts]", "")
-                .replace("[spk_emb]", "")
-                .replace("[empty_spk]", "")
-                .strip()
-            )
-            """
-            see https://github.com/2noise/ChatTTS/issues/459
-            """
-
-        if params.prompt:
-            text = [params.prompt + i for i in text]
-
-        txt_smp = "" if params.txt_smp is None else params.txt_smp
-        if params.spk_emb is not None:
-            text = [f"[Stts][spk_emb]{txt_smp}{i}[Ptts]" for i in text]
-        else:
-            text = [f"[Stts][empty_spk]{txt_smp}{i}[Ptts]" for i in text]
-
         input_ids, attention_mask, text_mask = self.tokenizer.encode(
-            text,
-            self.gpt.num_vq,
-            prompt_str=params.spk_smp,
-            device=gpt.device_gpt,
+            self.speaker.decorate_code_prompts(
+                text,
+                params.prompt,
+                params.txt_smp,
+                params.spk_emb,
+            ),
+            self.config.gpt.num_vq,
+            prompt=(
+                self.speaker.decode_prompt(params.spk_smp)
+                if params.spk_smp is not None
+                else None
+            ),
+            device=self.device_gpt,
         )
+        start_idx = input_ids.shape[-2]
 
-        emb = gpt(input_ids, text_mask)
-
-        del text_mask
-
-        if params.spk_emb is not None:
-            self.tokenizer.apply_spk_emb(
-                emb, params.spk_emb, input_ids, self.gpt.device_gpt
-            )
-
-        num_code = int(gpt.emb_code[0].num_embeddings - 1)
+        num_code = self.config.gpt.num_audio_tokens - 1
 
         logits_warpers, logits_processors = gen_logits(
             num_code=num_code,
@@ -517,6 +488,58 @@ class Chat:
             top_K=params.top_K,
             repetition_penalty=params.repetition_penalty,
         )
+
+        if gpt.is_vllm:
+            from .model.velocity import SamplingParams
+
+            sample_params = SamplingParams(
+                temperature=temperature,
+                max_new_token=params.max_new_token,
+                max_tokens=8192,
+                min_new_token=params.min_new_token,
+                logits_processors=(logits_processors, logits_warpers),
+                eos_token=num_code,
+                infer_text=False,
+                start_idx=start_idx,
+            )
+            input_ids = [i.tolist() for i in input_ids]
+
+            result = gpt.llm.generate(
+                None,
+                sample_params,
+                input_ids,
+            )
+
+            token_ids = []
+            hidden_states = []
+            for i in result:
+                token_ids.append(torch.tensor(i.outputs[0].token_ids))
+                hidden_states.append(
+                    i.outputs[0].hidden_states.to(torch.float32).to(self.device)
+                )
+
+            del text_mask, input_ids
+
+            return [
+                GPT.GenerationOutputs(
+                    ids=token_ids,
+                    hiddens=hidden_states,
+                    attentions=[],
+                ),
+            ]
+
+        emb = gpt(input_ids, text_mask)
+
+        del text_mask
+
+        if params.spk_emb is not None:
+            self.speaker.apply(
+                emb,
+                params.spk_emb,
+                input_ids,
+                self.tokenizer.spk_emb_ids,
+                self.gpt.device_gpt,
+            )
 
         result = gpt.generate(
             emb,
@@ -526,20 +549,18 @@ class Chat:
             attention_mask=attention_mask,
             max_new_token=params.max_new_token,
             min_new_token=params.min_new_token,
-            logits_warpers=logits_warpers,
-            logits_processors=logits_processors,
+            logits_processors=(*logits_processors, *logits_warpers),
             infer_text=False,
             return_hidden=return_hidden,
             stream=stream,
             show_tqdm=params.show_tqdm,
             ensure_non_empty=params.ensure_non_empty,
             stream_batch=params.stream_batch,
+            manual_seed=params.manual_seed,
             context=self.context,
         )
 
         del emb, input_ids
-        del_all(logits_warpers)
-        del_all(logits_processors)
 
         return result
 
@@ -556,12 +577,10 @@ class Chat:
         if not isinstance(text, list):
             text = [text]
 
-        text = [f"[Sbreak]{i}[Pbreak]{params.prompt}" for i in text]
-
         input_ids, attention_mask, text_mask = self.tokenizer.encode(
-            text,
-            self.gpt.num_vq,
-            device=gpt.device_gpt,
+            self.speaker.decorate_text_prompts(text, params.prompt),
+            self.config.gpt.num_vq,
+            device=self.device_gpt,
         )
 
         logits_warpers, logits_processors = gen_logits(
@@ -570,6 +589,42 @@ class Chat:
             top_K=params.top_K,
             repetition_penalty=params.repetition_penalty,
         )
+
+        if gpt.is_vllm:
+            from .model.velocity import SamplingParams
+
+            sample_params = SamplingParams(
+                repetition_penalty=params.repetition_penalty,
+                temperature=params.temperature,
+                top_p=params.top_P,
+                top_k=params.top_K,
+                max_new_token=params.max_new_token,
+                max_tokens=8192,
+                min_new_token=params.min_new_token,
+                logits_processors=(logits_processors, logits_warpers),
+                eos_token=self.tokenizer.eos_token,
+                infer_text=True,
+                start_idx=input_ids.shape[-2],
+            )
+            input_ids_list = [i.tolist() for i in input_ids]
+            del input_ids
+
+            result = gpt.llm.generate(
+                None, sample_params, input_ids_list, params.show_tqdm
+            )
+            token_ids = []
+            hidden_states = []
+            for i in result:
+                token_ids.append(torch.tensor(i.outputs[0].token_ids))
+                hidden_states.append(i.outputs[0].hidden_states)
+
+            del text_mask, input_ids_list, result
+
+            return GPT.GenerationOutputs(
+                ids=token_ids,
+                hiddens=hidden_states,
+                attentions=[],
+            )
 
         emb = gpt(input_ids, text_mask)
 
@@ -584,18 +639,16 @@ class Chat:
                 attention_mask=attention_mask,
                 max_new_token=params.max_new_token,
                 min_new_token=params.min_new_token,
-                logits_warpers=logits_warpers,
-                logits_processors=logits_processors,
+                logits_processors=(*logits_processors, *logits_warpers),
                 infer_text=True,
                 stream=False,
                 show_tqdm=params.show_tqdm,
                 ensure_non_empty=params.ensure_non_empty,
+                manual_seed=params.manual_seed,
                 context=self.context,
             )
         )
 
         del emb, input_ids
-        del_all(logits_warpers)
-        del_all(logits_processors)
 
         return result
